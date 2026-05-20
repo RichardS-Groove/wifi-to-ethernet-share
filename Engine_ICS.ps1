@@ -383,6 +383,134 @@ function Disable-ICS {
 }
 
 # ─────────────────────────────────────────────────────────────
+# MONITOR EN VIVO Y LOG DE CONSUMOS
+# ─────────────────────────────────────────────────────────────
+
+function Show-LiveMonitor {
+    Write-Header
+    Write-Host ("  " + $BOLD + $WHITE + "  MONITOR DE RED EN VIVO (Ethernet)" + $RESET)
+    Write-Host ("  " + $DIM + ("-" * 50) + $RESET)
+    
+    $info = Get-AdaptersInfo
+    if ($null -eq $info.Eth) {
+        Write-Host ("  " + $YELLOW + "  [AVISO] No se detecto adaptador Ethernet para monitorizar." + $RESET)
+        Write-Host ""
+        Write-Host ("  " + $DIM + "  Presiona ENTER para volver al menu..." + $RESET)
+        Read-Host | Out-Null
+        return
+    }
+
+    $adapterName = $info.Eth.Name
+    Write-Host ("  " + $CYAN + "  Monitorizando: " + $adapterName + $RESET)
+    Write-Host ("  " + $DIM + "  (Usa Ctrl+C para salir, o presiona 'Q' para volver al menu)" + $RESET)
+    Write-Host ""
+
+    $logPath = Join-Path -Path $PSScriptRoot -ChildPath "NetworkUsageLog.txt"
+    $initLogMsg = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] --- Inicio de monitorizacion en $adapterName ---"
+    Add-Content -Path $logPath -Value $initLogMsg
+
+    try {
+        $prevStats = Get-NetAdapterStatistics -Name $adapterName -ErrorAction Stop
+    } catch {
+        Write-Host ("  " + $RED + "  Error: No se pudieron obtener estadisticas de $adapterName." + $RESET)
+        Write-Host ""
+        Write-Host ("  " + $DIM + "  Presiona ENTER para volver al menu..." + $RESET)
+        Read-Host | Out-Null
+        return
+    }
+
+    # Limpiar buffer de teclado ANTES de iniciar por si quedo algun "Enter" rezagado
+    while ($Host.UI.RawUI.KeyAvailable) {
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+
+    $startStats = $prevStats
+    $startCursorY = [Console]::CursorTop
+    
+    while ($true) {
+        if ([Console]::KeyAvailable) {
+            $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            if ($key.Character -match 'q|Q' -or $key.VirtualKeyCode -eq 27) { break }
+        }
+
+        Start-Sleep -Seconds 1
+        $currStats = Get-NetAdapterStatistics -Name $adapterName -ErrorAction SilentlyContinue
+        if ($null -eq $currStats) { continue }
+
+        # Velocidad en tiempo real
+        $rxBytes = $currStats.ReceivedBytes - $prevStats.ReceivedBytes
+        $txBytes = $currStats.SentBytes - $prevStats.SentBytes
+
+        # Consumo acumulado desde que se inicio el monitor
+        $rxTotal = $currStats.ReceivedBytes - $startStats.ReceivedBytes
+        $txTotal = $currStats.SentBytes - $startStats.SentBytes
+
+        $rxKbps = [math]::Round($rxBytes / 1KB, 2)
+        $txKbps = [math]::Round($txBytes / 1KB, 2)
+        $rxMbps = [math]::Round($rxBytes / 1MB, 2)
+        $txMbps = [math]::Round($txBytes / 1MB, 2)
+        
+        $rxGb = [math]::Round($rxTotal / 1GB, 3)
+        $txGb = [math]::Round($txTotal / 1GB, 3)
+
+        $rxDisp = if ($rxMbps -ge 1) { "$($rxMbps.ToString('0.00').PadLeft(6)) MB/s" } else { "$($rxKbps.ToString('0.00').PadLeft(6)) KB/s" }
+        $txDisp = if ($txMbps -ge 1) { "$($txMbps.ToString('0.00').PadLeft(6)) MB/s" } else { "$($txKbps.ToString('0.00').PadLeft(6)) KB/s" }
+
+        $prevStats = $currStats
+
+        $logMsg = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] Bajada: $rxDisp (Acumulado: $rxGb GB) | Subida: $txDisp (Acumulado: $txGb GB)"
+        Add-Content -Path $logPath -Value $logMsg
+
+        [Console]::SetCursorPosition(0, $startCursorY)
+        Write-Host "                                                                                                   " -NoNewline
+        [Console]::SetCursorPosition(0, $startCursorY)
+        Write-Host ("  " + $GREEN + "  RX: " + $rxDisp + " [" + $rxGb.ToString('0.000') + " GB]" + "   " + $CYAN + "  TX: " + $txDisp + " [" + $txGb.ToString('0.000') + " GB]" + $RESET)
+    }
+
+    # Limpiar buffer de teclado si se presiono algo
+    while ($Host.UI.RawUI.KeyAvailable) {
+        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+    }
+
+    $endLogMsg = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] --- Fin de monitorizacion ---"
+    Add-Content -Path $logPath -Value $endLogMsg
+
+    Write-Host ""
+    Write-Host ""
+    Write-Host ("  " + $GREEN + "  Datos guardados en log: " + $logPath + $RESET)
+    Write-Host ""
+    Write-Host ("  " + $DIM + "  Presiona ENTER para volver al menu..." + $RESET)
+    Read-Host | Out-Null
+}
+
+function Show-UsageLogs {
+    Write-Header
+    Write-Host ("  " + $BOLD + $WHITE + "  HISTORIAL DE CONSUMOS" + $RESET)
+    Write-Host ("  " + $DIM + ("-" * 50) + $RESET)
+
+    $logPath = Join-Path -Path $PSScriptRoot -ChildPath "NetworkUsageLog.txt"
+
+    if (Test-Path $logPath) {
+        Write-Host ("  " + $CYAN + "  Ultimos registros en ${logPath}:" + $RESET)
+        Write-Host ""
+        $lines = Get-Content -Path $logPath -Tail 25 -ErrorAction SilentlyContinue
+        if ($null -ne $lines -and $lines.Count -gt 0) {
+            foreach ($line in $lines) {
+                Write-Host ("  " + $DIM + $line + $RESET)
+            }
+        } else {
+            Write-Host ("  " + $YELLOW + "  El log esta vacio." + $RESET)
+        }
+    } else {
+        Write-Host ("  " + $YELLOW + "  No se encontro archivo de log. Aun no hay consumos registrados." + $RESET)
+    }
+
+    Write-Host ""
+    Write-Host ("  " + $DIM + "  Presiona ENTER para volver al menu..." + $RESET)
+    Read-Host | Out-Null
+}
+
+# ─────────────────────────────────────────────────────────────
 # PANTALLA VISUAL "COMPARTIENDO"
 # ─────────────────────────────────────────────────────────────
 
@@ -460,13 +588,15 @@ try {
 
         Write-Host ("  " + $BOLD + $WHITE + "  MENU PRINCIPAL" + $RESET)
         Write-Host ""
-        Write-Host ("   " + $CYAN + "[1]" + $RESET + "  " + $WHITE + "Iniciar modo red" + $RESET + "   " + $DIM + "- Activa ICS: Wi-Fi -> Ethernet" + $RESET)
-        Write-Host ("   " + $CYAN + "[2]" + $RESET + "  " + $WHITE + "Estado de la red" + $RESET + "  " + $DIM + "- Muestra adaptadores y estado ICS" + $RESET)
-        Write-Host ("   " + $CYAN + "[3]" + $RESET + "  " + $WHITE + "Detener modo red" + $RESET + "  " + $DIM + "- Desactiva ICS y limpia adaptadores" + $RESET)
-        Write-Host ("   " + $RED  + "[4]" + $RESET + "  " + $WHITE + "Salir" + $RESET + "             " + $DIM + "- Cierra la herramienta de forma segura" + $RESET)
+        Write-Host ("   " + $CYAN + "[1]" + $RESET + "  " + $WHITE + "Iniciar modo red" + $RESET + "       " + $DIM + "- Activa ICS: Wi-Fi -> Ethernet" + $RESET)
+        Write-Host ("   " + $CYAN + "[2]" + $RESET + "  " + $WHITE + "Estado de la red" + $RESET + "       " + $DIM + "- Muestra adaptadores y estado ICS" + $RESET)
+        Write-Host ("   " + $CYAN + "[3]" + $RESET + "  " + $WHITE + "Monitor en vivo" + $RESET + "        " + $DIM + "- Ver subida/bajada Ethernet en tiempo real" + $RESET)
+        Write-Host ("   " + $CYAN + "[4]" + $RESET + "  " + $WHITE + "Ver historial consumos" + $RESET + " " + $DIM + "- Muestra log de consumos guardados" + $RESET)
+        Write-Host ("   " + $CYAN + "[5]" + $RESET + "  " + $WHITE + "Detener modo red" + $RESET + "       " + $DIM + "- Desactiva ICS y limpia adaptadores" + $RESET)
+        Write-Host ("   " + $RED  + "[6]" + $RESET + "  " + $WHITE + "Salir" + $RESET + "                  " + $DIM + "- Cierra la herramienta de forma segura" + $RESET)
         Write-Host ""
         Write-Host ("  " + $DIM + ("=" * 54) + $RESET)
-        Write-Host -NoNewline ("  " + $YELLOW + "  Tu eleccion [1-4]: " + $RESET)
+        Write-Host -NoNewline ("  " + $YELLOW + "  Tu eleccion [1-6]: " + $RESET)
 
         $choice = Read-Host
 
@@ -475,7 +605,7 @@ try {
         switch ($choice.Trim()) {
             '1' {
                 if ($global:ICSActivatedByThisScript) {
-                    Write-Host ("  " + $YELLOW + "[INFO] El ICS ya esta activo. Usa la opcion 3 para detenerlo primero." + $RESET)
+                    Write-Host ("  " + $YELLOW + "[INFO] El ICS ya esta activo. Usa la opcion 5 para detenerlo primero." + $RESET)
                 } else {
                     Enable-ICS
                     if ($global:ICSActivatedByThisScript) {
@@ -494,16 +624,22 @@ try {
                 Read-Host | Out-Null
             }
             '3' {
+                Show-LiveMonitor
+            }
+            '4' {
+                Show-UsageLogs
+            }
+            '5' {
                 Disable-ICS
                 Write-Host ""
                 Write-Host ("  " + $DIM + "  Presiona ENTER para continuar..." + $RESET)
                 Read-Host | Out-Null
             }
-            '4' {
+            '6' {
                 Invoke-SafeExit
             }
             default {
-                Write-Host ("  " + $YELLOW + "[AVISO] Opcion invalida. Elige 1, 2, 3 o 4." + $RESET)
+                Write-Host ("  " + $YELLOW + "[AVISO] Opcion invalida. Elige una opcion del 1 al 6." + $RESET)
                 Start-Sleep -Milliseconds 800
             }
         }
